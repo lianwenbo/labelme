@@ -124,7 +124,12 @@ class LabelListWidgetItem(QtGui.QStandardItem):
         和 Qt 自己的选中状态是两回事：选中状态会被 clearSelection 清掉，
         这个标记要一直留到下一次选中别的标注为止。
         """
-        self.setData(bool(value), LAST_SELECTED_ROLE)
+        value = bool(value)
+        current = self.data(LAST_SELECTED_ROLE)
+        # 值没变就不写，避免每次改选都刷一轮 dataChanged
+        if current is not None and bool(current) == value:
+            return
+        self.setData(value, LAST_SELECTED_ROLE)
 
     def isLastSelected(self):
         return bool(self.data(LAST_SELECTED_ROLE))
