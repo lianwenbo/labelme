@@ -122,3 +122,5 @@ shortcuts:
   show_all_polygons: null
   hide_all_polygons: null
   toggle_all_polygons: T
+
+  lock_annotation: Ctrl+L

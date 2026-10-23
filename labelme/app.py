@@ -172,6 +172,8 @@ class MainWindow(QtWidgets.QMainWindow):
         scrollArea = QtWidgets.QScrollArea()
         scrollArea.setWidget(self.canvas)
         scrollArea.setWidgetResizable(True)
+        # 保留引用：标注锁定需要拿 viewport 尺寸来算滚动位置
+        self.scrollArea = scrollArea
         self.scrollBars = {
             Qt.Vertical: scrollArea.verticalScrollBar(),
             Qt.Horizontal: scrollArea.horizontalScrollBar(),
@@ -570,6 +572,15 @@ class MainWindow(QtWidgets.QMainWindow):
             "Adjust brightness and contrast",
             enabled=False,
         )
+        # 标注锁定：开启后，在右侧列表选中标注会把它的几何中心移到视口中心
+        lockAnnotation = action(
+            self.tr("&Lock\nAnnotation"),
+            self.toggleLockAnnotation,
+            shortcuts.get("lock_annotation", "Ctrl+L"),
+            "unlock",
+            self.tr("Keep the selected annotation centered in the view"),
+            checkable=True,
+        )
         # Group zoom controls into a list for easier toggling.
         zoomActions = (
             self.zoomWidget,
@@ -651,6 +662,7 @@ class MainWindow(QtWidgets.QMainWindow):
             fitWindow=fitWindow,
             fitWidth=fitWidth,
             brightnessContrast=brightnessContrast,
+            lockAnnotation=lockAnnotation,
             zoomActions=zoomActions,
             openNextImg=openNextImg,
             openPrevImg=openPrevImg,
@@ -823,6 +835,7 @@ class MainWindow(QtWidgets.QMainWindow):
             None,
             fitWindow,
             zoom,
+            lockAnnotation,
             None,
             selectAiModel,
         )
@@ -1369,6 +1382,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 selected_shapes.append(item.shape())
             if selected_shapes:
                 self.canvas.selectShapes(selected_shapes)
+                # 标注锁定：只有「从右侧列表选中」才会走到这里。画布上点选会先把
+                # _noSelectionSlot 置 True，在上面的 guard 处就返回了，所以不会乱跳。
+                lock = getattr(getattr(self, "actions", None), "lockAnnotation", None)
+                if lock is not None and lock.isChecked():
+                    self.centerOnShapes(selected_shapes)
             else:
                 self.canvas.deSelectShape()
 
@@ -1431,6 +1449,51 @@ class MainWindow(QtWidgets.QMainWindow):
     def setScroll(self, orientation, value):
         self.scrollBars[orientation].setValue(int(value))
         self.scroll_values[orientation][self.filename] = value
+
+    # 标注锁定 -------------------------------------------------------------
+
+    def shapeCenter(self, shapes):
+        """若干标注的并集包围盒中心（图像坐标）。"""
+        xs, ys = [], []
+        for shape in shapes:
+            if shape.mask is not None and shape.points:
+                # mask 标注的 points[0] 是掩膜左上角，尺寸取自 mask
+                x0, y0 = shape.points[0].x(), shape.points[0].y()
+                h, w = shape.mask.shape[:2]
+                xs += [x0, x0 + w]
+                ys += [y0, y0 + h]
+            elif shape.points:
+                xs += [p.x() for p in shape.points]
+                ys += [p.y() for p in shape.points]
+        if not xs:
+            return None
+        return (min(xs) + max(xs)) / 2.0, (min(ys) + max(ys)) / 2.0
+
+    def centerOnShapes(self, shapes):
+        """把若干标注的并集中心移到视口中心。"""
+        center = self.shapeCenter(shapes)
+        if center is None:
+            return
+        # canvas 的绘制变换是 widget = (image + offsetToCenter()) * scale
+        offset = self.canvas.offsetToCenter()
+        scale = self.canvas.scale
+        x = (center[0] + offset.x()) * scale
+        y = (center[1] + offset.y()) * scale
+        viewport = self.scrollArea.viewport()
+        # setValue 会自动 clamp；图像小于视口时滚动范围为 0，自然不动
+        self.setScroll(Qt.Horizontal, x - viewport.width() / 2)
+        self.setScroll(Qt.Vertical, y - viewport.height() / 2)
+
+    def toggleLockAnnotation(self, checked):
+        """标注锁定开关：开启时把当前选中项立刻居中一次。"""
+        self.actions.lockAnnotation.setIcon(
+            utils.newIcon("lock" if checked else "unlock")
+        )
+        if not checked:
+            return
+        shapes = [item.shape() for item in self.labelList.selectedItems()]
+        if shapes:
+            self.centerOnShapes(shapes)
 
     def setZoom(self, value):
         self.actions.fitWidth.setChecked(False)
