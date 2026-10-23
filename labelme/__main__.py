@@ -14,6 +14,7 @@ from labelme import __version__
 from labelme.app import MainWindow
 from labelme.config import get_config
 from labelme.logger import logger
+from labelme.theme import apply_theme
 from labelme.utils import newIcon
 
 
@@ -165,6 +166,8 @@ def main():
     app.setApplicationName(__appname__)
     app.setWindowIcon(newIcon("icon"))
     app.installTranslator(translator)
+    # 配色要在创建窗口之前定下来，否则新调色板不会应用到已存在的控件上
+    apply_theme(app, (config.get("appearance") or {}).get("theme"))
     win = MainWindow(
         config=config,
         filename=filename,

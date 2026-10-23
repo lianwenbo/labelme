@@ -7,6 +7,12 @@ keep_prev_brightness: false
 keep_prev_contrast: false
 logger_level: info
 
+appearance:
+  # light  : 固定浅色（默认）。macOS 深色模式下 Qt 原生样式给出的调色板自相矛盾
+  #          （按钮文字纯黑、按钮底色深灰），工具栏基本看不清，所以默认不走系统主题
+  # system : 完全跟随系统主题，即 labelme 原来的行为
+  theme: light
+
 flags: null
 label_flags: null
 labels: null
