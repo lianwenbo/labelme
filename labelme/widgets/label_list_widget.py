@@ -6,6 +6,16 @@ from qtpy.QtGui import QPalette
 from qtpy.QtWidgets import QStyle
 
 
+#: 「上一次选中的标注」标记。用自定义 role 存，不碰 item 的文本和选中状态——
+#: 选中状态会被 clearSelection 抹掉，而这个标记要一直留着。
+LAST_SELECTED_ROLE = Qt.UserRole + 1
+
+LAST_SELECTED_BG = QtGui.QColor("#fff2cc")
+LAST_SELECTED_ACCENT = QtGui.QColor("#e08a00")
+LAST_SELECTED_TEXT = QtGui.QColor("#3a2c00")
+LAST_SELECTED_BAR_WIDTH = 3
+
+
 # https://stackoverflow.com/a/2039745/4158863
 class HTMLDelegate(QtWidgets.QStyledItemDelegate):
     def __init__(self, parent=None):
@@ -18,6 +28,15 @@ class HTMLDelegate(QtWidgets.QStyledItemDelegate):
         options = QtWidgets.QStyleOptionViewItem(option)
 
         self.initStyleOption(options, index)
+
+        is_last_selected = bool(index.data(LAST_SELECTED_ROLE))
+        is_selected = bool(option.state & QStyle.State_Selected)
+        # 已选中的行由样式自己画高亮底，再叠一层淡黄会脏；没选中时才铺底色
+        if is_last_selected and not is_selected:
+            options.backgroundBrush = QtGui.QBrush(LAST_SELECTED_BG)
+            options.font.setBold(True)
+
+        self.doc.setDefaultFont(options.font)
         self.doc.setHtml(options.text)
         options.text = ""
 
@@ -28,13 +47,27 @@ class HTMLDelegate(QtWidgets.QStyledItemDelegate):
         )
         style.drawControl(QStyle.CE_ItemViewItem, options, painter)
 
+        if is_last_selected:
+            # 左侧竖条画在最上层：选中时底色被高亮盖掉，竖条仍然能指出「上一次是这条」
+            painter.fillRect(
+                QtCore.QRect(
+                    option.rect.left(),
+                    option.rect.top(),
+                    LAST_SELECTED_BAR_WIDTH,
+                    option.rect.height(),
+                ),
+                LAST_SELECTED_ACCENT,
+            )
+
         ctx = QtGui.QAbstractTextDocumentLayout.PaintContext()
 
-        if option.state & QStyle.State_Selected:
+        if is_selected:
             ctx.palette.setColor(
                 QPalette.Text,
                 option.palette.color(QPalette.Active, QPalette.HighlightedText),
             )
+        elif is_last_selected:
+            ctx.palette.setColor(QPalette.Text, LAST_SELECTED_TEXT)
         else:
             ctx.palette.setColor(
                 QPalette.Text,
@@ -84,6 +117,17 @@ class LabelListWidgetItem(QtGui.QStandardItem):
 
     def shape(self):
         return self.data(Qt.UserRole)
+
+    def setLastSelected(self, value):
+        """标记 / 取消「上一次选中的标注」。
+
+        和 Qt 自己的选中状态是两回事：选中状态会被 clearSelection 清掉，
+        这个标记要一直留到下一次选中别的标注为止。
+        """
+        self.setData(bool(value), LAST_SELECTED_ROLE)
+
+    def isLastSelected(self):
+        return bool(self.data(LAST_SELECTED_ROLE))
 
     def __hash__(self):
         return id(self)

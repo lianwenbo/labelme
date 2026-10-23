@@ -95,6 +95,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self._copied_shapes = None
 
+        # 「上一次选中的标注」。列表里的选中高亮随时会被清掉，但做标注时经常要
+        # 来回看，得知道刚才选的是哪一条，所以单独记一份并常驻标记。
+        self._lastSelectedShapes = []
+
         # Main widgets and related state.
         self.labelDialog = LabelDialog(
             parent=self,
@@ -1000,6 +1004,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def resetState(self):
         self.labelList.clear()
+        self._lastSelectedShapes = []
         self.filename = None
         self.imagePath = None
         self.imageData = None
@@ -1189,6 +1194,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self.actions.duplicate.setEnabled(n_selected)
         self.actions.copy.setEnabled(n_selected)
         self.actions.edit.setEnabled(n_selected == 1)
+        # 取消选中（画布点空白）时不动标记，保留「上一次是这条」
+        if selected_shapes:
+            self.markLastSelected(selected_shapes)
+
+    def markLastSelected(self, shapes):
+        """在列表里标出「上一次选中的标注」，常驻显示。
+
+        画布点选、列表点选都会调到这里；只在选中非空时调用，所以取消选中
+        不会把标记抹掉——这正是它存在的意义。
+        """
+        self._lastSelectedShapes = list(shapes)
+        for item in self.labelList:
+            item.setLastSelected(any(item.shape() is shape for shape in shapes))
 
     def addLabel(self, shape):
         if shape.group_id is None:
@@ -1382,6 +1400,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 selected_shapes.append(item.shape())
             if selected_shapes:
                 self.canvas.selectShapes(selected_shapes)
+                self.markLastSelected(selected_shapes)
                 # 标注锁定：只有「从右侧列表选中」才会走到这里。画布上点选会先把
                 # _noSelectionSlot 置 True，在上面的 guard 处就返回了，所以不会乱跳。
                 lock = getattr(getattr(self, "actions", None), "lockAnnotation", None)
