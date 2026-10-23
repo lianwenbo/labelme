@@ -3,6 +3,7 @@ import shutil
 import tempfile
 
 import pytest
+from qtpy import QtWidgets
 
 import labelme.app
 import labelme.config
@@ -112,3 +113,60 @@ def test_MainWindow_annotate_jpg(qtbot):
 
     labelme.testing.assert_labelfile_sanity(out_file)
     shutil.rmtree(tmp_dir)
+
+
+@pytest.mark.gui
+def test_MainWindow_label_list_context_menu(qtbot, monkeypatch):
+    """右键标注列表不能报错，Split Line 只在单选的 line / linestrip 时出现。
+
+    菜单 exec_ 会阻塞，换成直接返回。这个用例是为了兜住「右键点一下就抛异常」
+    这类问题——之前 popLabelListMenu 里用了 QStandardItem 上不存在的
+    isSelected()，右键一按就 AttributeError。
+    """
+    monkeypatch.setattr(QtWidgets.QMenu, "exec_", lambda self, *args, **kwargs: None)
+
+    win = labelme.app.MainWindow()
+    qtbot.addWidget(win)
+    win.show()
+    qtbot.waitExposed(win)
+
+    win.loadLabels(
+        [
+            dict(
+                label="lon",
+                group_id=None,
+                points=[[0, 0], [100, 0]],
+                shape_type="line",
+                mask=None,
+                flags={},
+                other_data={},
+            ),
+            dict(
+                label="area",
+                group_id=None,
+                points=[[0, 0], [10, 0], [10, 10]],
+                shape_type="polygon",
+                mask=None,
+                flags={},
+                other_data={},
+            ),
+        ]
+    )
+    assert len(win.labelList) == 2
+
+    def right_click(row):
+        item = win.labelList[row]
+        index = win.labelList.model().indexFromItem(item)
+        win.popLabelListMenu(win.labelList.visualRect(index).center())
+        return index
+
+    # 右键落在没选中的行上：应该顺手把这一行选中，再决定菜单项
+    win.labelList.clearSelection()
+    index = right_click(0)
+    assert win.labelList.selectionModel().isSelected(index)
+    assert win.actions.splitLine.isVisible()
+
+    # 右键 polygon：Split Line 不出现
+    win.labelList.clearSelection()
+    right_click(1)
+    assert not win.actions.splitLine.isVisible()

@@ -1121,11 +1121,11 @@ class MainWindow(QtWidgets.QMainWindow):
     def popLabelListMenu(self, point):
         index = self.labelList.indexAt(point)
         if index.isValid():
-            item = self.labelList.model().itemFromIndex(index)
-            # 右键落在没选中的行上时先选中它，否则菜单会作用在之前选的那条上
-            if item is not None and not item.isSelected():
+            # 右键落在没选中的行上时先选中它，否则菜单会作用在之前选的那条上。
+            # 注意 isSelected 在 QItemSelectionModel 上，QStandardItem 没有这个方法。
+            if not self.labelList.selectionModel().isSelected(index):
                 self.labelList.clearSelection()
-                self.labelList.selectItem(item)
+                self.labelList.selectItem(self.labelList.model().itemFromIndex(index))
         # 只有单选的 line / linestrip 才显示「分割线」，其他类型连菜单项都不出现
         self.syncSplitLineAction()
         self.menus.labelList.exec_(self.labelList.mapToGlobal(point))
