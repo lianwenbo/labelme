@@ -1,3 +1,5 @@
+import math
+
 import imgviz
 from qtpy import QtCore
 from qtpy import QtGui
@@ -30,6 +32,9 @@ class Canvas(QtWidgets.QWidget):
     shapeMoved = QtCore.Signal()
     drawingPolygon = QtCore.Signal(bool)
     vertexSelected = QtCore.Signal(bool)
+    # 待分割状态下，用户在画布上点了一下：(目标标注, 段序号, 投影点)
+    splitPointSelected = QtCore.Signal(object, int, object)
+    splitCancelled = QtCore.Signal()
 
     CREATE, EDIT = 0, 1
 
@@ -92,6 +97,12 @@ class Canvas(QtWidgets.QWidget):
         self.hShapeIsSelected = False
         self._painter = QtGui.QPainter()
         self._cursor = CURSOR_DEFAULT
+        # 待分割状态：pendingSplitShape 非 None 时，下一次左键点击决定分割位置，
+        # pendingSplitPoint 是实时算出来的投影点，用来画预览
+        self.pendingSplitShape = None
+        self.pendingSplitPoint = None
+        self.pendingSplitIndex = None
+        self._splitJustCommitted = False
         # Menus:
         # 0: right-click without selection and dragging of shapes
         # 1: right-click with selection and dragging of shapes
@@ -236,6 +247,16 @@ class Canvas(QtWidgets.QWidget):
 
         self.prevMovePoint = pos
         self.restoreCursor()
+
+        # 待分割状态：只更新预览点，不做高亮 / 拖拽那一套
+        if self.pendingSplitShape is not None:
+            self.pendingSplitIndex, self.pendingSplitPoint = (
+                self.pendingSplitShape.splitPoint(pos)
+            )
+            self.overrideCursor(CURSOR_DRAW)
+            self.setToolTip(self.tr("Click to split here"))
+            self.update()
+            return
 
         is_shift_pressed = ev.modifiers() & QtCore.Qt.ShiftModifier
 
@@ -398,6 +419,26 @@ class Canvas(QtWidgets.QWidget):
         self.prevhVertex = None
         self.movingShape = True  # Save changes
 
+    def startPendingSplit(self, shape):
+        """进入待分割状态：下一次左键点击决定分割位置。
+
+        期间鼠标移动会实时算出投影点并画出来，用户点之前就能看见会切在哪。
+        """
+        self.pendingSplitShape = shape
+        self.pendingSplitPoint = None
+        self.pendingSplitIndex = None
+        self.update()
+
+    def cancelPendingSplit(self):
+        if self.pendingSplitShape is None:
+            return
+        self.pendingSplitShape = None
+        self.pendingSplitPoint = None
+        self.pendingSplitIndex = None
+        self.restoreCursor()
+        self.update()
+        self.splitCancelled.emit()
+
     def mousePressEvent(self, ev):
         if QT5:
             pos = self.transformPos(ev.localPos())
@@ -405,6 +446,25 @@ class Canvas(QtWidgets.QWidget):
             pos = self.transformPos(ev.posF())
 
         is_shift_pressed = ev.modifiers() & QtCore.Qt.ShiftModifier
+
+        # 待分割状态优先吃掉点击：左键确认分割位置，右键取消。
+        # 一定要在下面的选中逻辑之前返回，否则这一下会把标注取消选中。
+        if self.pendingSplitShape is not None:
+            if ev.button() == QtCore.Qt.LeftButton:
+                shape = self.pendingSplitShape
+                index, point = shape.splitPoint(pos)
+                self.pendingSplitShape = None
+                self.pendingSplitPoint = None
+                self.pendingSplitIndex = None
+                # 松开鼠标时不要再走「点已选中标注 = 取消选中」那段逻辑
+                self._splitJustCommitted = True
+                self.restoreCursor()
+                self.update()
+                if index is not None:
+                    self.splitPointSelected.emit(shape, index, point)
+            elif ev.button() == QtCore.Qt.RightButton:
+                self.cancelPendingSplit()
+            return
 
         if ev.button() == QtCore.Qt.LeftButton:
             if self.drawing():
@@ -486,6 +546,11 @@ class Canvas(QtWidgets.QWidget):
             self.prevPoint = pos
 
     def mouseReleaseEvent(self, ev):
+        # 刚确认完分割点：这一下左键只是为了定位，不该触发取消选中
+        if self._splitJustCommitted:
+            self._splitJustCommitted = False
+            return
+
         if ev.button() == QtCore.Qt.RightButton:
             menu = self.menus[len(self.selectedShapesCopy) > 0]
             self.restoreCursor()
@@ -778,6 +843,46 @@ class Canvas(QtWidgets.QWidget):
             drawing_shape.selected = True
             drawing_shape.paint(p)
 
+        # 待分割预览：在分割点画一道垂直于线段的短切线。
+        # 不用「一个红点」是因为选中的标注本身每个顶点都是红点，混在一起看不出来。
+        if (
+            self.pendingSplitShape is not None
+            and self.pendingSplitPoint is not None
+            and self.pendingSplitIndex is not None
+        ):
+            points = self.pendingSplitShape.points
+            i = self.pendingSplitIndex
+            dx = points[i].x() - points[i - 1].x()
+            dy = points[i].y() - points[i - 1].y()
+            norm = math.hypot(dx, dy) or 1.0
+            nx, ny = -dy / norm, dx / norm  # 线段方向转 90°，得到切线方向
+            half = 8.0 / self.scale
+            center = self.pendingSplitPoint
+            a = QtCore.QPointF(center.x() + nx * half, center.y() + ny * half)
+            b = QtCore.QPointF(center.x() - nx * half, center.y() - ny * half)
+            # 先白底后红线，压在地图花纹上也看得清
+            p.setPen(
+                QtGui.QPen(
+                    QtGui.QColor(255, 255, 255),
+                    4.0 / self.scale,
+                    QtCore.Qt.SolidLine,
+                    QtCore.Qt.RoundCap,
+                )
+            )
+            p.drawLine(a, b)
+            p.setPen(
+                QtGui.QPen(
+                    QtGui.QColor(214, 48, 49),
+                    2.0 / self.scale,
+                    QtCore.Qt.SolidLine,
+                    QtCore.Qt.RoundCap,
+                )
+            )
+            p.drawLine(a, b)
+            p.setBrush(QtGui.QColor(214, 48, 49))
+            p.drawEllipse(center, 3.0 / self.scale, 3.0 / self.scale)
+            p.setBrush(QtCore.Qt.NoBrush)
+
         p.end()
 
     def transformPos(self, point):
@@ -954,7 +1059,9 @@ class Canvas(QtWidgets.QWidget):
             elif modifiers == QtCore.Qt.AltModifier:
                 self.snapping = False
         elif self.editing():
-            if key == QtCore.Qt.Key_Up:
+            if key == QtCore.Qt.Key_Escape and self.pendingSplitShape is not None:
+                self.cancelPendingSplit()
+            elif key == QtCore.Qt.Key_Up:
                 self.moveByKeyboard(QtCore.QPointF(0.0, -MOVE_SPEED))
             elif key == QtCore.Qt.Key_Down:
                 self.moveByKeyboard(QtCore.QPointF(0.0, MOVE_SPEED))

@@ -44,6 +44,21 @@ from . import utils
 
 LABEL_COLORMAP = imgviz.label_colormap()
 
+#: 能参与「分割线」的标注类型。闭合图形（polygon / rectangle / circle）要切
+#: 两个点才有意义，点和掩膜更是无从谈起，所以只放开放折线进来。
+SPLITTABLE_SHAPE_TYPES = ("line", "linestrip")
+
+#: 分割点离已有顶点多近时，直接在该顶点处切开，不再插入重复顶点（图像像素）
+SPLIT_SNAP_TOLERANCE = 1.0
+
+
+def _isSplittable(shape):
+    return (
+        shape is not None
+        and shape.shape_type in SPLITTABLE_SHAPE_TYPES
+        and len(shape.points) >= 2
+    )
+
 
 class MainWindow(QtWidgets.QMainWindow):
     FIT_WINDOW, FIT_WIDTH, MANUAL_ZOOM = 0, 1, 2
@@ -413,6 +428,14 @@ class MainWindow(QtWidgets.QMainWindow):
             self.tr("Delete the selected polygons"),
             enabled=False,
         )
+        splitLine = action(
+            self.tr("Split Line"),
+            self.splitLineAtClick,
+            shortcuts.get("split_shape", "Ctrl+Shift+X"),
+            "split",
+            self.tr("Split the selected line into two at a point you click"),
+            enabled=False,
+        )
         duplicate = action(
             self.tr("Duplicate Polygons"),
             self.duplicateSelectedShape,
@@ -626,7 +649,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Lavel list context menu.
         labelMenu = QtWidgets.QMenu()
-        utils.addActions(labelMenu, (edit, delete))
+        utils.addActions(labelMenu, (edit, splitLine, delete))
         self.labelList.setContextMenuPolicy(Qt.CustomContextMenu)
         self.labelList.customContextMenuRequested.connect(self.popLabelListMenu)
 
@@ -667,6 +690,7 @@ class MainWindow(QtWidgets.QMainWindow):
             fitWidth=fitWidth,
             brightnessContrast=brightnessContrast,
             lockAnnotation=lockAnnotation,
+            splitLine=splitLine,
             zoomActions=zoomActions,
             openNextImg=openNextImg,
             openPrevImg=openPrevImg,
@@ -724,6 +748,8 @@ class MainWindow(QtWidgets.QMainWindow):
         )
 
         self.canvas.vertexSelected.connect(self.actions.removePoint.setEnabled)
+        self.canvas.splitPointSelected.connect(self.onSplitPointSelected)
+        self.canvas.splitCancelled.connect(self.onSplitCancelled)
 
         self.menus = utils.struct(
             file=self.menu(self.tr("&File")),
@@ -948,7 +974,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self.actions.createAiMaskMode,
             self.actions.editMode,
         )
-        utils.addActions(self.menus.edit, actions + self.actions.editMenu)
+        utils.addActions(
+            self.menus.edit, actions + self.actions.editMenu + (self.actions.splitLine,)
+        )
 
     def setDirty(self):
         # Even if we autosave the file, we keep the ability to undo
@@ -1003,6 +1031,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.statusBar().showMessage(message, delay)
 
     def resetState(self):
+        self.canvas.cancelPendingSplit()
         self.labelList.clear()
         self._lastSelectedShapes = []
         self.filename = None
@@ -1090,7 +1119,23 @@ class MainWindow(QtWidgets.QMainWindow):
             menu.addAction(action)
 
     def popLabelListMenu(self, point):
+        index = self.labelList.indexAt(point)
+        if index.isValid():
+            item = self.labelList.model().itemFromIndex(index)
+            # 右键落在没选中的行上时先选中它，否则菜单会作用在之前选的那条上
+            if item is not None and not item.isSelected():
+                self.labelList.clearSelection()
+                self.labelList.selectItem(item)
+        # 只有单选的 line / linestrip 才显示「分割线」，其他类型连菜单项都不出现
+        self.syncSplitLineAction()
         self.menus.labelList.exec_(self.labelList.mapToGlobal(point))
+
+    def syncSplitLineAction(self):
+        self.actions.splitLine.setVisible(self._canSplitCurrentSelection())
+
+    def _canSplitCurrentSelection(self):
+        items = self.labelList.selectedItems()
+        return len(items) == 1 and _isSplittable(items[0].shape())
 
     def validateLabel(self, label):
         # no validation
@@ -1194,6 +1239,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.actions.duplicate.setEnabled(n_selected)
         self.actions.copy.setEnabled(n_selected)
         self.actions.edit.setEnabled(n_selected == 1)
+        self.actions.splitLine.setEnabled(
+            n_selected == 1 and _isSplittable(selected_shapes[0])
+        )
         # 取消选中（画布点空白）时不动标记，保留「上一次是这条」
         if selected_shapes:
             self.markLastSelected(selected_shapes)
@@ -1273,6 +1321,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.labelList.clearSelection()
         self._noSelectionSlot = False
         self.canvas.loadShapes(shapes, replace=replace)
+        # 列表被整体重建了，item 是新的，得把「上一次选中」的标记补回去。
+        # 撤销、分割都会走这里，不补的话标记会莫名其妙消失。
+        if self._lastSelectedShapes:
+            self.markLastSelected(self._lastSelectedShapes)
 
     def loadLabels(self, shapes):
         s = []
@@ -1391,10 +1443,87 @@ class MainWindow(QtWidgets.QMainWindow):
         self._copied_shapes = [s.copy() for s in self.canvas.selectedShapes]
         self.actions.paste.setEnabled(len(self._copied_shapes) > 0)
 
+    # 分割线 ---------------------------------------------------------------
+
+    def splitLineAtClick(self):
+        """进入待分割状态：接下来在画布上点一下，决定从哪里把这条线切开。"""
+        if not self.canvas.editing():
+            self.status(self.tr("Finish the current annotation first"))
+            return
+        items = self.labelList.selectedItems()
+        if len(items) != 1 or not _isSplittable(items[0].shape()):
+            self.status(self.tr("Select exactly one line or line strip first"))
+            return
+        self.canvas.startPendingSplit(items[0].shape())
+        # 焦点给画布，Esc 才能被 canvas.keyPressEvent 接住
+        self.canvas.setFocus()
+        self.status(self.tr("Click on the line to split it (Esc to cancel)"))
+
+    def splitShapeAt(self, shape, index, point):
+        """在 points[index-1] -> points[index] 这条线段上插入 point，切成两段。
+
+        point 已经投影到该线段上，所以两段共用它、几何不变形。若投影点落在
+        已有顶点附近，直接在那个顶点处切开，避免造出几乎重合的重复顶点。
+        切完有一段不足两个点时返回 (None, None)。
+        """
+        points = list(shape.points)
+        if utils.distance(point - points[index]) <= SPLIT_SNAP_TOLERANCE:
+            cut = index
+        elif utils.distance(point - points[index - 1]) <= SPLIT_SNAP_TOLERANCE:
+            cut = index - 1
+        else:
+            cut = None
+
+        if cut is None:
+            first_points = points[:index] + [point]
+            second_points = [point] + points[index:]
+        else:
+            first_points = points[: cut + 1]
+            second_points = points[cut:]
+
+        if len(first_points) < 2 or len(second_points) < 2:
+            return None, None
+
+        # copy() 是 deepcopy，label / shape_type / group_id / flags /
+        # description / _closed 全都跟着走，只需要换掉点
+        first = shape.copy()
+        first.points = first_points
+        first.point_labels = [1] * len(first_points)
+        second = shape.copy()
+        second.points = second_points
+        second.point_labels = [1] * len(second_points)
+        return first, second
+
+    def onSplitPointSelected(self, shape, index, point):
+        first, second = self.splitShapeAt(shape, index, point)
+        if first is None:
+            self.status(self.tr("Cannot split there: one side would be empty"))
+            return
+
+        new_shapes = []
+        for other in self.canvas.shapes:
+            if other is shape:
+                # 新的一半紧跟在原来那一半后面，列表顺序不会被打乱
+                new_shapes.extend([first, second])
+            else:
+                new_shapes.append(other)
+
+        self.labelList.clear()
+        self.loadShapes(new_shapes)  # 同时重建画布形状并压入 undo 栈
+        self.shapeSelectionChanged([first, second])
+        self.markLastSelected([first, second])
+        self.setDirty()
+        self.status(self.tr("Line split into two"))
+
+    def onSplitCancelled(self):
+        self.status(self.tr("Split cancelled"))
+
     def labelSelectionChanged(self):
         if self._noSelectionSlot:
             return
         if self.canvas.editing():
+            # 在列表里改选别的标注，说明放弃这次分割了
+            self.canvas.cancelPendingSplit()
             selected_shapes = []
             for item in self.labelList.selectedItems():
                 selected_shapes.append(item.shape())

@@ -13,6 +13,23 @@ from labelme.logger import logger
 # - [opt] Store paths instead of creating new ones at each paint.
 
 
+def _projectOnSegment(point, p1, p2):
+    """point 在线段 p1-p2 上的投影点，以及两者距离。
+
+    投影落在端点之外时夹到端点上（和 ``distancetoline`` 的判定一致），
+    所以返回值一定在线段上，不会跑到延长线上去。
+    """
+    x1, y1 = p1.x(), p1.y()
+    dx, dy = p2.x() - x1, p2.y() - y1
+    denom = dx * dx + dy * dy
+    if denom == 0:
+        return QtCore.QPointF(x1, y1), math.hypot(point.x() - x1, point.y() - y1)
+    t = ((point.x() - x1) * dx + (point.y() - y1) * dy) / denom
+    t = 0.0 if t < 0.0 else (1.0 if t > 1.0 else t)
+    px, py = x1 + t * dx, y1 + t * dy
+    return QtCore.QPointF(px, py), math.hypot(point.x() - px, point.y() - py)
+
+
 class Shape(object):
     # Render handles as squares
     P_SQUARE = 0
@@ -304,6 +321,31 @@ class Shape(object):
                 min_distance = dist
                 post_i = i
         return post_i
+
+    def splitPoint(self, point):
+        """把 point 投影到折线最近的一段上，用于把折线切成两段。
+
+        返回 ``(段序号 i, 投影点)``，投影点落在 ``points[i-1] -> points[i]``
+        这条线段上（``i >= 1``）。只找正向线段，不走首尾回绕的那条——
+        回绕边是闭合图形才有意义的，不属于要分割的线本身。
+
+        投影点保证在线段上，因此切出来的两段能共用这个顶点，几何不失真。
+        点数不足两个时返回 ``(None, None)``。
+        """
+        if len(self.points) < 2:
+            return None, None
+        best_index = None
+        best_distance = float("inf")
+        best_point = None
+        for i in range(1, len(self.points)):
+            projected, distance = _projectOnSegment(
+                point, self.points[i - 1], self.points[i]
+            )
+            if distance < best_distance:
+                best_index = i
+                best_distance = distance
+                best_point = projected
+        return best_index, best_point
 
     def containsPoint(self, point):
         if self.mask is not None:
